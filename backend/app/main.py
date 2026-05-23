@@ -14,8 +14,15 @@ setup_logging()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Lifecycle startup actions
+    # Lifecycle startup actions: connect Redis
     await redis_client.connect()
+    
+    # Automatically initialize PostgreSQL tables
+    from backend.app.database import engine, Base
+    import backend.app.models  # Import to register mappings on Base.metadata
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        
     yield
     # Lifecycle shutdown actions
     await redis_client.disconnect()
