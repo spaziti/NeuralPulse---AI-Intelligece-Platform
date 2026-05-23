@@ -157,3 +157,45 @@ class NewsService:
         except Exception as e:
             logger.error(f"Error publishing news article to Redis: {e}")
             pass
+
+    async def hybrid_search(self, query: str, limit: int = 5) -> List[NewsArticle]:
+        """Perform hybrid search merging database keyword match and vector store semantic similarity via RRF."""
+        if not query.strip():
+            return []
+
+        # 1. Fetch lexical (keyword) search results from Postgres
+        lexical_results = await self.article_repo.search_by_keyword(query, limit=limit * 2)
+
+        # 2. Fetch semantic vector search results from ChromaDB
+        from vector_store.chroma_client import chroma_client
+        hits = await chroma_client.query_articles(query_text=query, n_results=limit * 2)
+        
+        semantic_uuids = []
+        for hit in hits:
+            try:
+                semantic_uuids.append(uuid.UUID(hit["id"]))
+            except ValueError:
+                pass
+        semantic_results = await self.article_repo.get_by_ids(semantic_uuids)
+
+        # 3. Apply Reciprocal Rank Fusion (RRF) to merge and rank results
+        k = 60
+        rrf_scores = {}
+        articles_by_id = {}
+
+        # Rank lexical matches
+        for rank, article in enumerate(lexical_results):
+            art_id = article.id
+            articles_by_id[art_id] = article
+            rrf_scores[art_id] = rrf_scores.get(art_id, 0.0) + (1.0 / (k + (rank + 1)))
+
+        # Rank semantic matches
+        for rank, article in enumerate(semantic_results):
+            art_id = article.id
+            articles_by_id[art_id] = article
+            rrf_scores[art_id] = rrf_scores.get(art_id, 0.0) + (1.0 / (k + (rank + 1)))
+
+        # Sort by descending RRF score
+        sorted_ids = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
+        
+        return [articles_by_id[art_id] for art_id in sorted_ids[:limit]]
