@@ -14,9 +14,15 @@ export interface NewsArticle {
   content: string | null;
   summary: string | null;
   sentiment: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL' | null;
-  sentimentScore: number | null;
-  publishedAt: string;
-  createdAt: string;
+  sentimentScore?: number | null;
+  sentiment_score?: number | null;
+  credibility_score?: number | null;
+  key_entities?: string | null;
+  briefing: string | null;
+  publishedAt?: string;
+  published_at?: string;
+  createdAt?: string;
+  created_at?: string;
 }
 
 export interface AnalysisResult {

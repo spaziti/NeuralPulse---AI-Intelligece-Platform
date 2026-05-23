@@ -40,6 +40,7 @@ class NewsArticleBase(BaseModel):
     sentiment_score: Optional[float] = None
     credibility_score: Optional[float] = None
     key_entities: Optional[str] = None
+    briefing: Optional[str] = None
     published_at: datetime
 
 

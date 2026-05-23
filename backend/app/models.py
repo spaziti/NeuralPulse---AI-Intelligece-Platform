@@ -45,6 +45,7 @@ class NewsArticle(Base):
     published_at: Mapped[datetime] = mapped_column(
         DateTime, index=True, nullable=False
     )
+    briefing: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=datetime.utcnow, nullable=False
     )

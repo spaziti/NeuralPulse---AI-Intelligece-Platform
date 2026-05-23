@@ -59,22 +59,63 @@ def analyze_article_task(article_id: str) -> str:
                 logger.error(f"Article not found: {article_id}")
                 return f"Failed: Article {article_id} not found"
 
-            # Execute AI agent analysis
-            agent_manager = AIAgentManager()
-            analysis = await agent_manager.analyze_content(
-                title=article.title, 
-                content=article.content or ""
-            )
+            # 1. Fetch similar historical articles from ChromaDB to support contradiction detection
+            similar_articles_data = []
+            try:
+                hits = await chroma_client.query_articles(query_text=article.title, n_results=4)
+                similar_uuids = []
+                for hit in hits:
+                    # Ensure we don't query comparison against the current article itself
+                    if hit["id"] != article_id:
+                        try:
+                            similar_uuids.append(uuid.UUID(hit["id"]))
+                        except ValueError:
+                            pass
+                if similar_uuids:
+                    resolved = await repo.get_by_ids(similar_uuids)
+                    for item in resolved:
+                        similar_articles_data.append({
+                            "title": item.title,
+                            "content": item.content or ""
+                        })
+            except Exception as e:
+                logger.warning(f"Could not retrieve comparison articles for contradiction checking: {e}")
 
-            # Update article database entity with agent results
-            article.summary = analysis.get("summary")
-            article.sentiment = analysis.get("sentiment")
-            article.sentiment_score = analysis.get("sentiment_score")
-            article.credibility_score = analysis.get("credibility_score")
-            article.key_entities = analysis.get("key_entities")
+            # 2. Execute multi-agent state graph workflow
+            from ai_agents.intelligence_workflow import intelligence_workflow
+            workflow_state = {
+                "title": article.title,
+                "content": article.content or "",
+                "similar_articles": similar_articles_data,
+                "summary": "",
+                "sentiment": "NEUTRAL",
+                "sentiment_score": 0.0,
+                "credibility_score": 0.8,
+                "credibility_explanation": "",
+                "trends": [],
+                "key_entities": [],
+                "contradictions": [],
+                "briefing": ""
+            }
+
+            result_state = await intelligence_workflow.ainvoke(workflow_state)
+
+            # 3. Update database model attributes
+            article.summary = result_state.get("summary")
+            article.sentiment = result_state.get("sentiment")
+            article.sentiment_score = result_state.get("sentiment_score")
+            article.credibility_score = result_state.get("credibility_score")
+            
+            entities = result_state.get("key_entities")
+            if isinstance(entities, list):
+                article.key_entities = ", ".join(entities)
+            else:
+                article.key_entities = str(entities)
+                
+            article.briefing = result_state.get("briefing")
             await db.commit()
 
-            # Store / Update embedding in ChromaDB vector store
+            # 4. Store / Update embedding in ChromaDB vector store
             await chroma_client.upsert_article(
                 article_id=str(article.id),
                 title=article.title,
@@ -89,8 +130,7 @@ def analyze_article_task(article_id: str) -> str:
                 }
             )
 
-            
-            logger.info(f"Successfully completed analysis & embedding for article: {article_id}")
+            logger.info(f"Successfully completed multi-agent analysis & embedding for article: {article_id}")
             return f"Success: Article {article_id} processed"
 
     return run_async(_run())
