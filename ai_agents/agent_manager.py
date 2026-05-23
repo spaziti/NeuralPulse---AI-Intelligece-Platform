@@ -13,6 +13,39 @@ class AIAgentManager:
         self.openai_key = settings.OPENAI_API_KEY
         self.openai_url = "https://api.openai.com/v1/chat/completions"
 
+    async def optimize_query(self, question: str, chat_history: List[Dict[str, Any]]) -> str:
+        """Optimizes search queries by resolving coreferences and rewriting them based on chat history."""
+        if not chat_history or not self.openai_key:
+            return question
+
+        # Format conversation history (last 5 messages)
+        history_str = ""
+        for msg in chat_history[-5:]:
+            role = msg.get("role", "user").upper()
+            content = msg.get("content", "")
+            history_str += f"{role}: {content}\n"
+
+        system_prompt = (
+            "You are a Query Optimization Agent. Your job is to analyze the conversation history "
+            "and the user's latest follow-up question. Rewrite the follow-up question into a "
+            "single, standalone, self-contained search query. This query should contain all context "
+            "necessary to perform semantic and keyword database retrieval without needing the conversation history. "
+            "Do NOT answer the question, only output the rewritten search query. "
+            "Respond ONLY with a JSON object in this format: "
+            '{"query": "The rewritten standalone search query."}'
+        )
+
+        user_content = f"Conversation History:\n{history_str}\nFollow-up Question: {question}"
+
+        try:
+            res = await self._call_llm(system_prompt, user_content)
+            optimized_query = res.get("query", question)
+            logger.info(f"Optimized user query from '{question}' to '{optimized_query}'")
+            return optimized_query
+        except Exception as e:
+            logger.error(f"Failed to optimize query via LLM: {e}. Using original question.")
+            return question
+
     async def analyze_content(self, title: str, content: str) -> Dict[str, Any]:
         """Orchestrate a Multi-Agent pipeline for processing raw news articles.
 

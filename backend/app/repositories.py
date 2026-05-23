@@ -74,6 +74,17 @@ class NewsArticleRepository(BaseRepository[NewsArticle]):
         articles_map = {article.id: article for article in result.scalars().all()}
         return [articles_map[id] for id in ids if id in articles_map]
 
+    async def search_by_keyword(self, query_str: str, limit: int = 50) -> List[NewsArticle]:
+        """Fetch news articles matching keyword query via SQL ILIKE pattern matching."""
+        if not query_str:
+            return []
+        query = select(NewsArticle).where(
+            (NewsArticle.title.ilike(f"%{query_str}%")) |
+            (NewsArticle.content.ilike(f"%{query_str}%"))
+        ).order_by(desc(NewsArticle.published_at)).limit(limit)
+        result = await self.db.execute(query)
+        return list(result.scalars().all())
+
 
     async def get_articles(
         self,

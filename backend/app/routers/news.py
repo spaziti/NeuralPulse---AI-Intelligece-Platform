@@ -80,19 +80,48 @@ async def semantic_search(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
-    """Query ChromaDB vector store and fetch matched records from PostgreSQL."""
+    """Hybrid search combining PostgreSQL keyword matches and ChromaDB vector search via Reciprocal Rank Fusion (RRF)."""
+    if not query.strip():
+        return []
+
+    # 1. Fetch lexical (keyword) search results from Postgres
+    news_repo = NewsArticleRepository(db)
+    lexical_results = await news_repo.search_by_keyword(query, limit=limit * 2)
+
+    # 2. Fetch semantic vector search results from ChromaDB
     from vector_store.chroma_client import chroma_client
-    hits = await chroma_client.query_articles(query_text=query, n_results=limit)
+    hits = await chroma_client.query_articles(query_text=query, n_results=limit * 2)
     
-    uuids = []
+    semantic_uuids = []
     for hit in hits:
         try:
-            uuids.append(uuid.UUID(hit["id"]))
+            semantic_uuids.append(uuid.UUID(hit["id"]))
         except ValueError:
             pass
-            
-    news_repo = NewsArticleRepository(db)
-    return await news_repo.get_by_ids(uuids)
+    semantic_results = await news_repo.get_by_ids(semantic_uuids)
+
+    # 3. Apply Reciprocal Rank Fusion (RRF) to merge and rank results
+    # Formula: RRF_score(d) = sum( 1 / (k + rank_i(d)) )
+    k = 60
+    rrf_scores = {}
+    articles_by_id = {}
+
+    # Rank lexical matches
+    for rank, article in enumerate(lexical_results):
+        art_id = article.id
+        articles_by_id[art_id] = article
+        rrf_scores[art_id] = rrf_scores.get(art_id, 0.0) + (1.0 / (k + (rank + 1)))
+
+    # Rank semantic matches
+    for rank, article in enumerate(semantic_results):
+        art_id = article.id
+        articles_by_id[art_id] = article
+        rrf_scores[art_id] = rrf_scores.get(art_id, 0.0) + (1.0 / (k + (rank + 1)))
+
+    # Sort by descending RRF score
+    sorted_ids = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
+    
+    return [articles_by_id[art_id] for art_id in sorted_ids[:limit]]
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -102,21 +131,46 @@ async def news_rag_chat(
     current_user: User = Depends(get_current_active_user)
 ):
     """Retrieval-Augmented Generation (RAG) agent Chat over news archives."""
-    # 1. Search semantic matches in vector store
+    from ai_agents.agent_manager import AIAgentManager
+    agent = AIAgentManager()
+
+    # 1. Optimize query using AgentManager by resolving coreferences in chat history
+    search_query = await agent.optimize_query(payload.question, payload.chat_history or [])
+
+    # 2. Perform hybrid search (PostgreSQL keyword + ChromaDB vector search)
+    news_repo = NewsArticleRepository(db)
+    lexical_results = await news_repo.search_by_keyword(search_query, limit=8)
+
     from vector_store.chroma_client import chroma_client
-    hits = await chroma_client.query_articles(query_text=payload.question, n_results=4)
+    hits = await chroma_client.query_articles(query_text=search_query, n_results=8)
     
-    uuids = []
+    semantic_uuids = []
     for hit in hits:
         try:
-            uuids.append(uuid.UUID(hit["id"]))
+            semantic_uuids.append(uuid.UUID(hit["id"]))
         except ValueError:
             pass
-            
-    news_repo = NewsArticleRepository(db)
-    sources = await news_repo.get_by_ids(uuids)
+    semantic_results = await news_repo.get_by_ids(semantic_uuids)
+
+    # 3. Apply Reciprocal Rank Fusion (RRF) to merge results
+    k = 60
+    rrf_scores = {}
+    articles_by_id = {}
+
+    for rank, article in enumerate(lexical_results):
+        art_id = article.id
+        articles_by_id[art_id] = article
+        rrf_scores[art_id] = rrf_scores.get(art_id, 0.0) + (1.0 / (k + (rank + 1)))
+
+    for rank, article in enumerate(semantic_results):
+        art_id = article.id
+        articles_by_id[art_id] = article
+        rrf_scores[art_id] = rrf_scores.get(art_id, 0.0) + (1.0 / (k + (rank + 1)))
+
+    sorted_ids = sorted(rrf_scores.keys(), key=lambda x: rrf_scores[x], reverse=True)
+    sources = [articles_by_id[art_id] for art_id in sorted_ids[:4]]
     
-    # 2. Formulate references context text block
+    # 4. Formulate references context text block
     context_texts = []
     for idx, article in enumerate(sources):
         context_texts.append(
@@ -125,20 +179,30 @@ async def news_rag_chat(
             f"Content: {article.content or ''}\n"
         )
     context_str = "\n---\n".join(context_texts)
+
+    # 5. Format conversation history (last 5 messages) for contextual synthesis
+    history_str = ""
+    if payload.chat_history:
+        for msg in payload.chat_history[-5:]:
+            role = msg.get("role", "user").upper()
+            content = msg.get("content", "")
+            history_str += f"{role}: {content}\n"
     
-    # 3. Formulate Agent chat parameters
+    # 6. Formulate Agent chat parameters
     system_prompt = (
         "You are the NeuralPulse AI News RAG Assistant. Answer the user's question using the provided context articles. "
         "Integrate the news details accurately. Cite the source using brackets like [1] or [2] matching the source indices. "
+        "Keep the conversation history context in mind. "
         "If the context does not contain the answer, answer based on general knowledge but clearly state that the provided sources do not mention it. "
         "Respond ONLY with a JSON object in this format: "
         '{"answer": "Your detailed answer citing sources [1]..."}'
     )
     
-    user_content = f"Context News Articles:\n{context_str}\n\nQuestion: {payload.question}"
-    
-    from ai_agents.agent_manager import AIAgentManager
-    agent = AIAgentManager()
+    user_content = (
+        f"Context News Articles:\n{context_str}\n\n"
+        f"Conversation History:\n{history_str}\n"
+        f"Latest Question: {payload.question}"
+    )
     
     if settings.OPENAI_API_KEY:
         try:

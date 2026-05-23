@@ -56,12 +56,12 @@ class ChromaDBClient:
         """Embed and store article records in ChromaDB."""
         collection = self._get_collection()
         
-        # In a full feature implementation, we would call an embedding model here.
-        # For the foundational skeleton, we supply ChromaDB's default embedding service (e.g. SentenceTransformers)
-        # by passing raw text strings. ChromaDB handles embedding internally.
         document_text = f"Title: {title}\nSummary: {summary}\nContent: {content}"
         
         try:
+            from vector_store.embeddings import embeddings_service
+            embedding = await embeddings_service.get_embedding(document_text)
+            
             # Running synchronous ChromaDB SDK operation in executor
             import asyncio
             loop = asyncio.get_running_loop()
@@ -69,6 +69,7 @@ class ChromaDBClient:
             def sync_upsert():
                 collection.upsert(
                     ids=[article_id],
+                    embeddings=[embedding],
                     documents=[document_text],
                     metadatas=[metadata]
                 )
@@ -87,16 +88,19 @@ class ChromaDBClient:
         n_results: int = 5,
         where_filter: Optional[Dict[str, Any]] = None
     ) -> List[Dict[str, Any]]:
-        """Perform semantic search against ChromaDB."""
+        """Perform semantic search against ChromaDB using custom query embeddings."""
         collection = self._get_collection()
         
         try:
+            from vector_store.embeddings import embeddings_service
+            query_embedding = await embeddings_service.get_embedding(query_text)
+            
             import asyncio
             loop = asyncio.get_running_loop()
             
             def sync_query():
                 return collection.query(
-                    query_texts=[query_text],
+                    query_embeddings=[query_embedding],
                     n_results=n_results,
                     where=where_filter
                 )
